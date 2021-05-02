@@ -1,19 +1,16 @@
-from collections import deque
-from collections import namedtuple
-from typing import Optional
+import logging
+from typing import Dict
 
-import matplotlib.pyplot as plt
 import numpy as np
 import scipy.ndimage as ndi
 import seaborn as sns
 from skimage import morphology as morph
 
-from frontier_attacks import compute_attacks
+from cliodynamics.models.frontier_attacks import compute_attacks
 
 
 INT_t = np.int64
 FLOAT_t = np.float64
-ModelRecord = namedtuple("ModelRecord", ("membership", "asabiya"))
 
 
 class MetaethnicFrontierModel:
@@ -49,6 +46,7 @@ class MetaethnicFrontierModel:
         # Model state
         self._membership = membership.astype(INT_t)
         self._asabiya = asabiya.astype(FLOAT_t)
+        self._max_empire_id = 1
 
         # Model parameters
         self._r0 = r0
@@ -62,8 +60,9 @@ class MetaethnicFrontierModel:
         membership = np.zeros((size, size), dtype=INT_t)
         asabiya = np.zeros((size, size), dtype=FLOAT_t)
 
-        # Sensible defaults
-        membership[:size // 2, :size // 2] = 1
+        # Sensible defaults according to Turchin
+        start = np.random.randint(0, size - 4)
+        membership[start:start + 4, start:start + 4] = 1
         asabiya[:] = 0.25
 
         return cls(
@@ -72,12 +71,30 @@ class MetaethnicFrontierModel:
         )
 
     @property
-    def membership(self):
+    def membership(self) -> np.ndarray:
         return self._membership
 
     @property
-    def asabiya(self):
+    def asabiya(self) -> np.ndarray:
         return self._asabiya
+
+    def get_empires(self) -> np.ndarray:
+        empires = np.unique(self._membership)
+        empires = empires[np.nonzero(empires)]
+        assert 0 not in empires
+        return empires
+
+    def get_areas(self) -> Dict[int, float]:
+        empires = self.get_empires()
+        areas = np.sum(
+            np.array(
+                empires[:, np.newaxis, np.newaxis] ==
+                self._membership[np.newaxis, :, :]
+            ).astype(FLOAT_t), axis=(1, 2),
+        )
+
+        assert areas.shape == (len(empires),)
+        return dict(zip(empires, areas))
 
     def step(self):
         ## Update asabiya map
@@ -87,10 +104,10 @@ class MetaethnicFrontierModel:
         areas_dense = self._get_empire_areas()
         
         ## Average asabiya for each empire
-        average_asabiyas_dense = self._get_empire_average_asabiyas()
+        average_asabiyas_dense = self._get_empire_asabiyas()
 
         ## Compute distances of each cell to its imperial center
-        distances = self._get_empire_average_distances_from_center()
+        distances = self._get_empire_distances_from_center()
 
         ## Compute power for each cell
         powers = areas_dense * average_asabiyas_dense * \
@@ -99,24 +116,17 @@ class MetaethnicFrontierModel:
         ## Create a visitation schedule for each interior cell
         schedule = self._create_schedule()
 
-        compute_attacks(
+        self._max_empire_id = compute_attacks(
             schedule=schedule,
             powers=powers,
             membership=self._membership,
             asabiya=self._asabiya,
+            max_empire_id=self._max_empire_id,
             delta_p=self._delta_p,
         )
-        # for i1, j1, i2, j2 in schedule:
-        #     p_attacker = powers[i1, j1]
-        #     p_defender = powers[i2, j2]
-        #     if p_attacker - p_defender > self._delta_p:
-        #         if self._membership[i1, j1] == 0: # New empire!
-        #             self._membership[i1, j1] = self._membership.max() + 1
 
-        #         self._membership[i2, j2] = self._membership[i1, j1]
-        #         self._asabiya[i2, j2] = (
-        #             self._asabiya[i2, j2] + self._asabiya[i1, j1]
-        #         ) / 2.
+        ## Average asabiya for each empire, one more time (post-attack)
+        average_asabiyas_dense = self._get_empire_asabiyas()
 
         ## Check for imperial collapse
         collapsed = np.logical_and(
@@ -127,6 +137,8 @@ class MetaethnicFrontierModel:
 
         ## Edge of the map
         self._update_edge_cells()
+
+        return powers
 
     def _update_asabiya(self):
         dilated = morph.dilation(self._membership, selem=self._CONNECTIVITY)
@@ -144,18 +156,11 @@ class MetaethnicFrontierModel:
         self._asabiya[~boundary] *= (1 - self._delta)
 
     def _get_empire_areas(self):
-        empires = np.unique(self._membership)
-        areas = np.sum(
-            np.array(
-                empires[:, np.newaxis, np.newaxis] ==
-                self._membership[np.newaxis, :, :]
-            ).astype(FLOAT_t), axis=(1, 2),
-        )
-        assert areas.shape == (len(empires),)
+        empire_to_area = self.get_areas()
 
         # Convert to dense tensor
         areas_dense = np.ones_like(self._membership, dtype=FLOAT_t)
-        for eid, area in zip(empires, areas):
+        for eid, area in empire_to_area.items():
             if eid == 0:
                 # "No empire" means area is one
                 continue
@@ -165,13 +170,14 @@ class MetaethnicFrontierModel:
 
         return areas_dense
 
-    def _get_empire_average_asabiyas(self):
-        empires = np.unique(self._membership)
+    def _get_empire_asabiyas(self):
+        empires = self.get_empires()
         average_asabiyas = ndi.mean(
             input=self._asabiya,
             labels=self._membership,
             index=empires,
         )
+
         assert average_asabiyas.shape == (len(empires),)
 
         # Convert to dense tensor
@@ -186,13 +192,14 @@ class MetaethnicFrontierModel:
 
         return average_asabiyas_dense
 
-    def _get_empire_average_distances_from_center(self):
-        empires = np.unique(self._membership)
+    def _get_empire_distances_from_center(self):
+        empires = self.get_empires()
         centers = np.array(ndi.center_of_mass(
             input=np.ones_like(self._membership),
             labels=self._membership,
             index=empires,
         ), dtype=FLOAT_t)
+
         assert centers.shape == (len(empires), 2)
 
         distances = np.zeros_like(self._membership, dtype=FLOAT_t)
@@ -207,7 +214,7 @@ class MetaethnicFrontierModel:
             assert ijs.ndim == 2
             assert ijs.shape[1] == 2
 
-            distances[mask] = np.linalg.norm(ijs - center)
+            distances[mask] = np.linalg.norm(ijs - center, axis=1)
 
         return distances
 
@@ -255,31 +262,3 @@ class MetaethnicFrontierModel:
         self._membership[0, :] = self._membership[1, :]
         self._asabiya[-1, :] = self._asabiya[-2, :]
         self._membership[-1, :] = self._membership[-2, :]
-
-
-def plot_model(model: MetaethnicFrontierModel,
-               ax1: plt.Axes,
-               ax2: plt.Axes,
-               num_empires = 30):
-
-    palette = [(0.8, 0.8, 0.8)] + sns.color_palette("Set2", n_colors=num_empires)
-    sns.heatmap(
-        model.membership,
-        cmap=palette,
-        ax=ax1,
-        cbar=False,
-        xticklabels=False,
-        yticklabels=False,
-        vmin=0,
-        vmax=num_empires,
-    )
-
-    sns.heatmap(
-        model.asabiya,
-        ax=ax2,
-        cbar=False,
-        xticklabels=False,
-        yticklabels=False,
-        vmin=0,
-        vmax=1,
-    )

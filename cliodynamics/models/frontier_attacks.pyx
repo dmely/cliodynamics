@@ -12,6 +12,7 @@ def compute_attacks(np.ndarray schedule,
                     np.ndarray powers,
                     np.ndarray membership,
                     np.ndarray asabiya,
+                    int max_empire_id,
                     float delta_p):
     
     cdef int height = powers.shape[0]
@@ -43,7 +44,7 @@ def compute_attacks(np.ndarray schedule,
     # Iterate
     cdef int s, i1, j1, i2, j2, num_empires
     cdef float p_attacker, p_defender
-    num_empires = membership.max()
+    num_empires = max_empire_id
 
     for s in range(schedule_length):
         i1 = schedule[s, 0]
@@ -61,3 +62,5 @@ def compute_attacks(np.ndarray schedule,
 
             membership[i2, j2] = membership[i1, j1]
             asabiya[i2, j2] = (asabiya[i2, j2] + asabiya[i1, j1]) / 2.
+
+    return num_empires

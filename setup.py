@@ -1,4 +1,4 @@
-"""Run: python setup.py build_ext --inplace
+"""Run: python setup.py build_ext --inplace --build-lib build
 """
 
 import numpy
@@ -12,9 +12,9 @@ setup(
     cmdclass = {"build_ext": build_ext}, 
     ext_modules = [
         Extension(
-            "models.frontier_attacks",
-            ["models/frontier_attacks.pyx"],
-            include_dirs=[numpy.get_include()]
+            "cliodynamics.models.frontier_attacks",
+            ["cliodynamics/models/frontier_attacks.pyx"],
+            include_dirs=[numpy.get_include()],
         ),
     ],
 )
